@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#16181d" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f2f3f6" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#111317" media="(prefers-color-scheme: dark)">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="配当メモ">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -16,76 +16,138 @@
 </head>
 <body>
   <header class="top">
-    <h1 id="page-title">ホーム</h1>
+    <div class="bar">
+      <select id="account-filter" class="pill" aria-label="口座"></select>
+      <h1 id="page-title">配当</h1>
+      <div class="seg" id="tax-seg" role="group" aria-label="税">
+        <button type="button" data-tax="gross">税引前</button>
+        <button type="button" data-tax="net">税引後</button>
+      </div>
+    </div>
   </header>
 
   <main>
-    <!-- ホーム -->
-    <section id="home" class="page active">
-      <div id="empty-home" class="card empty" hidden>
-        <p><strong>まだ銘柄がありません。</strong></p>
-        <p>下の「銘柄」から1つずつ追加するか、「読込」で証券会社のCSVから銘柄と株数をまとめて登録してください。</p>
+    <div id="notice" class="notice" hidden></div>
+
+    <!-- 資産 -->
+    <section id="assets" class="page">
+      <div class="card hero">
+        <div class="label">総資産評価額</div>
+        <div id="a-value" class="big">—</div>
+        <div id="a-gain" class="gain"></div>
+        <div id="a-sub" class="muted small"></div>
       </div>
-
-      <div id="home-body">
-        <div class="card hero">
-          <div class="label">年間の配当（税引後）</div>
-          <div id="annual-net" class="big">—</div>
-          <div class="muted small">税引前 <span id="annual-gross">—</span> ／ 月平均 <span id="monthly-avg">—</span></div>
-          <div id="yoc" class="muted small"></div>
-          <p id="missing" class="warn small" hidden></p>
+      <div class="card">
+        <div class="row-between">
+          <span class="label">資産の内訳</span>
+          <select id="a-by" class="mini-select" aria-label="まとめ方">
+            <option value="holding">銘柄</option><option value="asset">種類</option><option value="tax">口座区分</option><option value="account">口座</option><option value="sector">業種</option>
+          </select>
         </div>
+        <div id="a-donut" class="donut-wrap"></div>
+      </div>
+      <div class="card">
+        <div class="label">資産の推移</div>
+        <div id="a-line" class="chart"></div>
+      </div>
+      <div class="card">
+        <div class="row-between">
+          <span class="label" id="a-count">銘柄一覧</span>
+          <select id="a-sort" class="mini-select" aria-label="並べ替え">
+            <option value="value">評価額順</option><option value="gain">評価損益順</option><option value="gainPct">損益率順</option><option value="code">コード順</option>
+          </select>
+        </div>
+        <ul id="a-list" class="holdings tappable"></ul>
+      </div>
+    </section>
 
-        <div class="card">
-          <div class="row-between">
-            <span class="label">月ごとの配当</span>
-            <label class="toggle small"><input type="checkbox" id="show-net" checked> 税引後</label>
+    <!-- 配当 -->
+    <section id="dividends" class="page active">
+      <div class="card hero">
+        <div class="label" id="d-label">年間配当金額</div>
+        <div class="big-row"><span id="d-total" class="big">—</span><span id="d-yield" class="yield"></span></div>
+        <div id="d-sub" class="muted small"></div>
+      </div>
+      <div class="card">
+        <div class="row-between">
+          <span class="label">月別配当金額</span>
+          <div class="seg small" id="basis-seg" role="group" aria-label="月の基準">
+            <button type="button" data-basis="pay">支払月</button>
+            <button type="button" data-basis="record">確定月</button>
           </div>
-          <div id="month-chart" class="chart"></div>
         </div>
-
-        <div class="card">
-          <div class="label">これから入る配当（目安）</div>
-          <ul id="upcoming" class="list"></ul>
+        <div class="row-between small muted"><span id="d-avg"></span><span class="legend-inline"><i class="sw a"></i>配当 <i class="sw b"></i>優待</span></div>
+        <div id="d-bars" class="chart"></div>
+        <div class="label" id="d-month-label"></div>
+        <ul id="d-month" class="list"></ul>
+      </div>
+      <div class="card">
+        <div class="row-between">
+          <span class="label">配当ポートフォリオ</span>
+          <select id="d-by" class="mini-select" aria-label="まとめ方">
+            <option value="holding">銘柄</option><option value="asset">種類</option><option value="tax">口座区分</option><option value="account">口座</option><option value="sector">業種</option>
+          </select>
         </div>
-
-        <div class="card">
-          <div class="label">銘柄ごとの割合（税引前）</div>
-          <ul id="share-list" class="bars"></ul>
-        </div>
+        <div id="d-donut" class="donut-wrap"></div>
+      </div>
+      <div class="card">
+        <div class="label">配当の推移（年間配当・税引後）</div>
+        <div id="d-line" class="chart"></div>
       </div>
     </section>
 
     <!-- 銘柄 -->
     <section id="holdings" class="page">
-      <button type="button" id="add-holding" class="primary">＋ 銘柄を追加</button>
+      <div class="actions">
+        <button type="button" id="add-holding" class="primary">＋ 追加</button>
+        <button type="button" id="go-import">CSV読込</button>
+        <button type="button" id="go-update">Claudeで更新</button>
+      </div>
       <div class="card">
-        <ul id="holding-list" class="list tappable"></ul>
+        <div class="row-between">
+          <span class="label" id="h-count"></span>
+          <select id="h-sort" class="mini-select" aria-label="並べ替え">
+            <option value="div">配当額順</option><option value="yield">利回り順</option><option value="value">評価額順</option><option value="code">コード順</option>
+          </select>
+        </div>
+        <ul id="h-list" class="holdings tappable"></ul>
       </div>
     </section>
 
-    <!-- 銘柄の追加・編集 -->
+    <!-- 追加・編集 -->
     <section id="edit" class="page">
-      <form id="edit-form" class="card">
-        <label>銘柄コード<input type="text" id="f-code" maxlength="12" required placeholder="例：7203" autocapitalize="characters"></label>
-        <label>銘柄名<input type="text" id="f-name" maxlength="60" placeholder="例：〇〇商事"></label>
+      <form id="edit-form" class="card" novalidate>
         <div class="two">
-          <label>株数<input type="text" inputmode="decimal" id="f-shares" required placeholder="100"></label>
-          <label>取得単価（任意）<input type="text" inputmode="decimal" id="f-cost" placeholder="円"></label>
+          <label>種類<select id="f-asset"><option value="jp">日本株</option><option value="us">米国株</option><option value="fund">投資信託</option></select></label>
+          <label>コード<input type="text" id="f-code" maxlength="16" required placeholder="7203 / AAPL" autocapitalize="characters" autocomplete="off"></label>
         </div>
-        <label>口座
-          <select id="f-account">
-            <option value="taxable">課税口座（特定・一般）</option>
-            <option value="nisa">NISA（配当は非課税）</option>
-          </select>
-        </label>
+        <label>銘柄名<input type="text" id="f-name" maxlength="60" autocomplete="off"></label>
+        <div class="two">
+          <label>口座<select id="f-account"></select></label>
+          <label>口座区分<select id="f-tax"></select></label>
+        </div>
+        <div class="two">
+          <label id="f-shares-label">株数<input type="text" inputmode="decimal" id="f-shares" required></label>
+          <label id="f-cost-label">取得単価<input type="text" inputmode="decimal" id="f-cost"></label>
+        </div>
+        <div class="two">
+          <label id="f-price-label">現在値<input type="text" inputmode="decimal" id="f-price"></label>
+          <label>業種<input type="text" id="f-sector" maxlength="30" placeholder="例：卸売業"></label>
+        </div>
+        <p id="f-unit-note" class="muted small"></p>
 
-        <div class="label">配当（1株あたり・支払い月の目安）</div>
+        <div class="label">配当（1株あたり）</div>
+        <div class="pay-head small muted"><span>確定月</span><span>支払月</span><span id="f-dps-head">1株配当</span><span></span></div>
         <ul id="f-payments" class="payments"></ul>
         <button type="button" id="f-add-payment" class="mini">＋ 支払いを追加</button>
-        <p class="muted small">例：3月決算で中間30円・期末35円なら、「12月 30円」「6月 35円」。会社の決算資料や証券会社の銘柄ページで確認できます。</p>
-        <p id="f-preview" class="muted small"></p>
+        <label class="check small"><input type="checkbox" id="f-nodiv"> 配当・分配金なし（「未入力」の表示を消す）</label>
 
+        <div class="two">
+          <label>株主優待（年額・円）<input type="text" inputmode="numeric" id="f-yutai" placeholder="任意"></label>
+          <label>優待の月<select id="f-yutai-month"><option value="">—</option></select></label>
+        </div>
+        <label>メモ<textarea id="f-memo" rows="2" maxlength="300"></textarea></label>
+        <p id="f-preview" class="muted small"></p>
         <p id="f-msg" class="msg" role="status"></p>
         <button type="submit" class="primary">保存</button>
         <button type="button" id="f-cancel">戻る</button>
@@ -93,71 +155,104 @@
       </form>
     </section>
 
-    <!-- 読み込み -->
+    <!-- CSV 読み込み -->
     <section id="import" class="page">
       <div class="card">
-        <div class="label">配当を貼り付け</div>
-        <p class="small">① 下のボタンで銘柄コードの一覧をコピーして、Claude に「配当を調べて」と送ります。② 返ってきた文章をコピーして、ここに貼り付けます。</p>
-        <button type="button" id="copy-codes">① 銘柄コードの一覧をコピー</button>
-        <textarea id="div-text" rows="6" placeholder="例：&#10;7203,6,50&#10;7203,12,45" spellcheck="false"></textarea>
-        <button type="button" id="div-apply" class="primary">② 配当を反映する</button>
-        <p id="div-msg" class="msg" role="status"></p>
-        <p class="muted small">1行に「銘柄コード,支払い月,1株あたり配当」。貼り付けた銘柄は、入力済みの配当を置き換えます。</p>
-      </div>
-
-      <div class="card">
-        <div class="label">証券会社のCSVから銘柄を登録</div>
-        <p class="small">証券会社のサイトからダウンロードした「保有証券一覧」などのCSVを選ぶと、銘柄と株数をまとめて登録します。ファイルはこのiPhoneの中だけで読み、どこにも送りません。</p>
+        <p class="small">証券会社の「保有証券一覧」などのCSVを選ぶと、銘柄・数量・取得単価・現在値・口座区分を読み取ります。ファイルはこのiPhoneの中だけで読み、どこにも送りません。</p>
+        <label>登録先の口座<select id="c-account"></select></label>
         <label>ファイル<input type="file" id="csv-file" accept=".csv,text/csv,text/plain"></label>
         <p id="csv-msg" class="msg"></p>
       </div>
       <div id="csv-step2" class="card" hidden>
-        <div class="label">どの列を使うか</div>
-        <div class="two">
-          <label>銘柄コード<select id="c-code"></select></label>
-          <label>銘柄名<select id="c-name"></select></label>
-          <label>株数<select id="c-shares"></select></label>
-          <label>取得単価<select id="c-cost"></select></label>
-        </div>
-        <div class="label">読み取れた銘柄</div>
-        <div class="preview-wrap"><table id="csv-preview" class="preview"></table></div>
-        <label class="check small"><input type="checkbox" id="c-remove"> CSVにない銘柄は一覧から外す（売った銘柄の整理）</label>
-        <button type="button" id="csv-apply" class="primary">登録する</button>
-        <p class="muted small">すでにある銘柄（同じコード・同じ口座）は株数と取得単価だけを更新し、入力済みの配当はそのまま残します。</p>
+        <details>
+          <summary class="small">読み取る列を変える</summary>
+          <div class="two">
+            <label>コード<select id="c-code"></select></label>
+            <label>銘柄名<select id="c-name"></select></label>
+            <label>数量<select id="c-shares"></select></label>
+            <label>取得単価<select id="c-cost"></select></label>
+            <label>現在値<select id="c-price"></select></label>
+          </div>
+        </details>
+        <div class="row-between"><span class="label" id="c-count"></span><button type="button" id="c-toggle" class="mini">すべて解除</button></div>
+        <ul id="c-list" class="checklist"></ul>
+        <label class="check small"><input type="checkbox" id="c-remove"> この口座で、CSVにない銘柄は外す（売った銘柄の整理）</label>
+        <button type="button" id="csv-apply" class="primary">選んだ銘柄を登録</button>
+        <button type="button" class="back">戻る</button>
+        <p class="muted small">同じ口座・口座区分に同じ銘柄があれば、数量・取得単価・現在値だけを更新し、配当などはそのまま残します。</p>
+      </div>
+    </section>
+
+    <!-- Claude で更新 -->
+    <section id="update" class="page">
+      <div class="card">
+        <ol class="small steps">
+          <li>下のボタンで依頼文をコピーして、Claude に送ります（送るのは銘柄コードと名前だけ。株数や金額は入りません）。</li>
+          <li>Claude の返事をコピーして、下の欄に貼り付けます。</li>
+        </ol>
+        <button type="button" id="copy-codes">① 依頼文をコピー</button>
+        <textarea id="div-text" rows="8" placeholder="例：&#10;USDJPY,155.3&#10;8058,3,6,50,4950,卸売業&#10;8058,9,12,50,,&#10;KO,6,7,0.51,70.1,生活必需品" spellcheck="false"></textarea>
+        <button type="button" id="div-apply" class="primary">② 反映する</button>
+        <p id="div-msg" class="msg" role="status"></p>
+        <p class="muted small">形式：コード,確定月,支払月,1株配当,株価,業種（米国株はドル、投資信託は1万口あたり）。貼り付けた銘柄は、配当が置き換わります。</p>
+        <button type="button" class="back">戻る</button>
       </div>
     </section>
 
     <!-- 設定 -->
     <section id="settings" class="page">
       <div class="card">
-        <div class="label">データの保存場所</div>
-        <p class="small">入力したデータは、<strong>このiPhoneのこのアプリの中だけ</strong>に保存されます。インターネットには送りません。</p>
-        <p class="small">iPhoneの買い替えや、Safariの「履歴とWebサイトデータを消去」でデータが消えます。ときどきバックアップを書き出して、「ファイル」アプリなどに保存してください。</p>
-        <p id="persist-status" class="muted small"></p>
+        <div class="label">口座・名義（10個まで）</div>
+        <ul id="s-accounts" class="list"></ul>
+        <form id="s-account-form" class="inline-form">
+          <input type="text" id="s-account-name" maxlength="20" placeholder="例：SBI証券、家族" required>
+          <button type="submit" class="mini">追加</button>
+        </form>
+      </div>
+      <div class="card">
+        <div class="label">ドル円レート（米国株の計算に使用）</div>
+        <form id="s-fx-form" class="inline-form">
+          <input type="text" inputmode="decimal" id="s-fx" placeholder="例：155.3">
+          <button type="submit" class="mini">保存</button>
+        </form>
+        <p id="s-fx-date" class="muted small"></p>
+      </div>
+      <div class="card">
+        <div class="label">文字の大きさ</div>
+        <div class="seg wide" id="font-seg" role="group" aria-label="文字の大きさ">
+          <button type="button" data-font="s">小</button><button type="button" data-font="m">標準</button><button type="button" data-font="l">大</button><button type="button" data-font="xl">特大</button>
+        </div>
       </div>
       <div class="card">
         <div class="label">バックアップ</div>
+        <p class="small">データは<strong>このiPhoneの中だけ</strong>に保存されます。機種変更やSafariのデータ消去で消えるので、ときどき書き出して「ファイル」アプリ（iCloud Drive）に保存してください。</p>
         <button type="button" id="export">バックアップを書き出す</button>
         <p id="last-export" class="muted small"></p>
         <label>バックアップから戻す<input type="file" id="restore" accept=".json,application/json"></label>
         <p id="backup-msg" class="msg" role="status"></p>
+        <p id="persist-status" class="muted small"></p>
       </div>
       <div class="card">
         <div class="label">計算について</div>
-        <p class="small">年間配当＝株数×1株あたり配当の合計。課税口座は税率20.315%を引いた額、NISAは非課税として計算しています。支払い月は入力した目安で、実際の入金日とずれることがあります。</p>
+        <ul class="small plain">
+          <li>税引後：特定・一般口座は20.315%を差し引き。NISA・iDeCoは国内の税なし。米国株は米国の税10%を先に差し引き（NISAでもかかる）。</li>
+          <li>投資信託は1万口あたりの基準価額・分配金で計算。</li>
+          <li>株価・配当は入力・貼り付けた時点の値で、自動では更新されません。</li>
+          <li>表示は入力した値の集計で、投資の助言ではありません。</li>
+        </ul>
       </div>
       <div class="card">
         <div class="label">データの削除</div>
         <button type="button" id="wipe" class="danger">すべてのデータを削除</button>
       </div>
-      <p class="muted small center">配当メモ v0.1 ／ 表示している数字は入力した値の集計で、投資の助言ではありません。</p>
+      <p class="muted small center">配当メモ v0.2</p>
     </section>
   </main>
 
   <nav class="tabbar">
-    <button data-page="home" class="active"><span class="ico">◎</span>ホーム</button>
-    <button data-page="holdings"><span class="ico">▤</span>銘柄</button>
-    <button data-page="import"><span class="ico">⇣</span>読込</button>
+    <button data-page="assets"><span class="ico">◔</span>資産</button>
+    <button data-page="dividends" class="active"><span class="ico">▥</span>配当</button>
+    <button data-page="holdings"><span class="ico">☰</span>銘柄</button>
     <button data-page="settings"><span class="ico">⚙︎</span>設定</button>
   </nav>
 

@@ -1,210 +1,346 @@
-import { load, save, clearAll, requestPersist, validate, uid, emptyState } from "./lib/store.js";
-import { summary, upcoming, annualGross, annualDps, yieldOnCost, yen, pct, ACCOUNTS, TAX_RATE } from "./lib/calc.js";
+import { load, save, clearAll, requestPersist } from "./lib/store.js";
+import { emptyState, validate, uid, ASSET_TYPES, TAX_TYPES, isNisa } from "./lib/model.js";
+import { summary, holdingMetrics, monthItems, breakdown, recordHistory, series, yen, signedYen, pct, signedPct } from "./lib/calc.js";
 import { decode, parseCSV, parseNumber, detectHeaderRow, guessColumns, extractHoldings, parseDividendText } from "./lib/csv.js";
+import { monthBars, donut, line, PALETTE, OTHER_COLOR } from "./lib/chart.js";
 
+// ---------- 小さな道具 ----------
 const $ = (id) => document.getElementById(id);
 const el = (tag, props = {}, ...children) => {
   const e = document.createElement(tag);
-  Object.assign(e, props);
-  for (const c of children) if (c != null) e.append(c);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "dataset") Object.assign(e.dataset, v);
+    else if (k === "style") Object.assign(e.style, v);
+    else e[k] = v;
+  }
+  for (const c of children) if (c != null && c !== false) e.append(c);
   return e;
 };
 const todayKey = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
-const fmtDate = (k) => { const [y, m, d] = k.split("-"); return `${y}/${Number(m)}/${Number(d)}`; };
-const fmtNum = (n) => (n == null ? "" : n.toLocaleString("ja-JP", { maximumFractionDigits: 4 }));
-const tag = (account) => el("span", { className: `tag ${account}`, textContent: ACCOUNTS[account] });
+const fmtDate = (k) => { if (!k) return ""; const [y, m, d] = k.split("-"); return `${y}/${Number(m)}/${Number(d)}`; };
+const fmtNum = (n, digits = 4) => (n == null ? "—" : n.toLocaleString("ja-JP", { maximumFractionDigits: digits }));
+const fmtPrice = (h, v) => (v == null ? "—" : h.assetType === "us" ? `$${fmtNum(v, 2)}` : `${fmtNum(v, 2)}円`);
+const uiGet = (k, d) => { try { return localStorage.getItem(`dividend-memo:ui:${k}`) ?? d; } catch { return d; } };
+const uiSet = (k, v) => { try { localStorage.setItem(`dividend-memo:ui:${k}`, v); } catch { /* 無視 */ } };
 
 let state = load();
-const commit = () => {
+const ui = {
+  page: uiGet("page", "dividends"),
+  account: uiGet("account", "all"),
+  month: new Date().getMonth(),
+};
+if (ui.account !== "all" && !state.accounts.some((a) => a.id === ui.account)) ui.account = "all";
+
+function commit() {
+  state.history = recordHistory(state, todayKey());
   if (!save(state)) alert("保存できませんでした。iPhoneの空き容量を確認してください。");
   render();
-};
+}
 
 // ---------- 画面切り替え ----------
-const TITLES = { home: "ホーム", holdings: "銘柄", edit: "銘柄の編集", import: "CSVから読み込み", settings: "設定" };
+const TITLES = { assets: "資産", dividends: "配当", holdings: "銘柄", edit: "銘柄", import: "CSV読込", update: "Claudeで更新", settings: "設定" };
+const TAB_OF = { edit: "holdings", import: "holdings", update: "holdings" };
 function go(page) {
-  const tab = page === "edit" ? "holdings" : page;
+  ui.page = page;
+  if (!TAB_OF[page]) uiSet("page", page);
+  const tab = TAB_OF[page] || page;
   for (const b of document.querySelectorAll(".tabbar button")) b.classList.toggle("active", b.dataset.page === tab);
   for (const p of document.querySelectorAll(".page")) p.classList.toggle("active", p.id === page);
   $("page-title").textContent = TITLES[page];
   window.scrollTo(0, 0);
 }
 for (const b of document.querySelectorAll(".tabbar button")) b.addEventListener("click", () => go(b.dataset.page));
+for (const b of document.querySelectorAll("button.back")) b.addEventListener("click", () => go("holdings"));
 
-// ---------- ホーム ----------
-function renderHome() {
-  const empty = state.holdings.length === 0;
-  $("empty-home").hidden = !empty;
-  $("home-body").hidden = empty;
-  if (empty) return;
+// ---------- 上部（口座・税の切り替え） ----------
+$("account-filter").addEventListener("change", (e) => { ui.account = e.target.value; uiSet("account", ui.account); render(); });
+for (const b of document.querySelectorAll("#tax-seg button")) b.addEventListener("click", () => { state.settings.tax = b.dataset.tax; save(state); render(); });
+for (const b of document.querySelectorAll("#basis-seg button")) b.addEventListener("click", () => { state.settings.basis = b.dataset.basis; save(state); render(); });
+for (const b of document.querySelectorAll("#font-seg button")) b.addEventListener("click", () => { state.settings.font = b.dataset.font; save(state); render(); });
 
-  const s = summary(state);
-  $("annual-net").textContent = yen(s.net);
-  $("annual-gross").textContent = yen(s.gross);
-  $("monthly-avg").textContent = yen(s.monthlyAvgNet);
-  $("yoc").textContent = s.yieldOnCost != null ? `取得額に対する利回り（税引前・取得単価を入れた銘柄）：${pct(s.yieldOnCost)}` : "";
-  $("missing").hidden = s.missing === 0;
-  $("missing").textContent = `配当が未入力の銘柄が ${s.missing} 件あります（「銘柄」から入力）`;
+function renderTop() {
+  const sel = $("account-filter");
+  sel.textContent = "";
+  sel.append(el("option", { value: "all", textContent: "全口座" }));
+  for (const a of state.accounts) sel.append(el("option", { value: a.id, textContent: a.name }));
+  sel.value = ui.account;
+  sel.hidden = state.accounts.length < 2;
+  for (const b of document.querySelectorAll("#tax-seg button")) b.classList.toggle("on", b.dataset.tax === state.settings.tax);
+  for (const b of document.querySelectorAll("#basis-seg button")) b.classList.toggle("on", b.dataset.basis === state.settings.basis);
+  for (const b of document.querySelectorAll("#font-seg button")) b.classList.toggle("on", b.dataset.font === state.settings.font);
+  document.documentElement.className = `font-${state.settings.font}`;
+}
 
-  drawMonthChart(s.monthly, $("show-net").checked);
-
-  const up = $("upcoming"); up.textContent = "";
-  const list = upcoming(state, new Date(), 3);
-  if (!list.length) up.append(el("li", { className: "muted" }, "配当を入力すると、ここに出ます"));
-  for (const u of list) {
-    const uniq = [...new Set(u.items.map((x) => x.h.name || x.h.code))]; // NISAと課税口座の同じ銘柄は1つに
-    const names = uniq.slice(0, 3).join("、") + (uniq.length > 3 ? ` ほか${uniq.length - 3}件` : "");
-    up.append(el("li", {},
-      el("span", {}, `${u.month}月`, el("span", { className: "sub" }, names)),
-      el("span", { className: "right" }, yen(u.net), el("span", { className: "sub" }, `税引前 ${yen(u.gross)}`)),
-    ));
+function renderNotice(s) {
+  const box = $("notice");
+  box.textContent = "";
+  const msgs = [];
+  if (!state.holdings.length) {
+    box.append(el("div", {}, "まだ銘柄がありません。「銘柄」から追加するか、証券会社のCSVを読み込んでください。"),
+      btn("CSVを読み込む", () => go("import")), btn("1つずつ追加", () => openEdit(null)));
+    box.hidden = false;
+    return;
   }
-
-  const sl = $("share-list"); sl.textContent = "";
-  // 同じ銘柄（NISAと課税口座の両方で持っている等）はまとめる
-  const byCode = new Map();
-  for (const r of s.rows) {
-    if (r.gross <= 0) continue;
-    const cur = byCode.get(r.holding.code) || { label: r.holding.name || r.holding.code, v: 0 };
-    cur.v += r.gross;
-    byCode.set(r.holding.code, cur);
+  if (s.missingFx) msgs.push(["米国株の計算にドル円レートが必要です。", "設定する", () => go("settings")]);
+  if (s.missingDiv || s.missingPrice) {
+    const parts = [];
+    if (s.missingDiv) parts.push(`配当が未入力 ${s.missingDiv}件`);
+    if (s.missingPrice) parts.push(`株価が未入力 ${s.missingPrice}件`);
+    msgs.push([`${parts.join("・")}。`, "Claudeで更新", () => go("update")]);
   }
-  const top = [...byCode.values()].sort((a, b) => b.v - a.v);
-  const shown = top.slice(0, 8);
-  const rest = top.slice(8).reduce((a, r) => a + r.v, 0);
-  const items = [...shown];
-  if (rest > 0) items.push({ label: `その他 ${top.length - 8}銘柄`, v: rest });
-  for (const it of items) {
-    const p = s.gross > 0 ? (it.v / s.gross) * 100 : 0;
-    const fill = el("div", { className: "fill" }); fill.style.width = `${p}%`;
-    sl.append(el("li", {},
-      el("div", { className: "row-between" }, el("span", {}, it.label), el("span", {}, `${yen(it.v)}（${p.toFixed(1)}%）`)),
-      el("div", { className: "track" }, fill),
-    ));
+  for (const [t, label, fn] of msgs) box.append(el("div", {}, t, " ", btn(label, fn)));
+  box.hidden = msgs.length === 0;
+}
+const btn = (label, fn) => { const b = el("button", { type: "button", textContent: label }); b.addEventListener("click", fn); return b; };
+
+// ---------- 共通：銘柄の行 ----------
+const accountName = (id) => state.accounts.find((a) => a.id === id)?.name || "";
+function tags(h) {
+  return [
+    state.accounts.length > 1 ? el("span", { className: "tag", textContent: accountName(h.accountId) }) : null,
+    h.taxType !== "taxable" ? el("span", { className: `tag ${isNisa(h.taxType) ? "nisa" : ""}`, textContent: TAX_TYPES[h.taxType] }) : null,
+    h.assetType !== "jp" ? el("span", { className: "tag", textContent: ASSET_TYPES[h.assetType] }) : null,
+  ];
+}
+function holdingRow(r, tax, extra) {
+  const h = r.h;
+  const div = tax === "net" ? r.net : r.gross;
+  const li = el("li", {},
+    el("div", { className: "l1" }, el("span", { className: "code", textContent: h.code.length > 8 ? "投信" : h.code }), el("span", { className: "nm", textContent: h.name || h.code }), ...tags(h)),
+    el("div", { className: "kv" },
+      el("span", { className: "k", textContent: h.assetType === "fund" ? "基準価額" : "株価" }), el("span", { className: "v", textContent: fmtPrice(h, h.price) }),
+      el("span", { className: "k", textContent: h.assetType === "fund" ? "口数" : "株数" }), el("span", { className: "v", textContent: fmtNum(h.shares) }),
+      el("span", { className: "k", textContent: "評価額" }), el("span", { className: "v", textContent: yen(r.value) }),
+      el("span", { className: "k", textContent: "配当" }), el("span", { className: "v", textContent: r.missingDiv ? "未入力" : h.noDividend && !h.payments.length ? "なし" : yen(div) }),
+      ...(extra || []),
+    ),
+  );
+  li.addEventListener("click", () => openEdit(h.id));
+  return li;
+}
+
+function legendFor(items, total, colors) {
+  return el("ul", { className: "legend" }, ...items.map((x, i) => el("li", {},
+    el("span", { className: "dot", style: { background: colors[i] || (x.other ? OTHER_COLOR : PALETTE[i % PALETTE.length]) } }),
+    el("span", { className: "name", textContent: x.label }),
+    el("span", { className: "pc", textContent: `${((x.v / total) * 100).toFixed(1)}%` }),
+  )));
+}
+function drawDonut(box, s, by, metric, centerLabel) {
+  box.textContent = "";
+  const { items, total } = breakdown(s, state, by, metric);
+  if (!items.length) { box.append(el("div", { className: "empty-chart", style: { gridColumn: "1 / -1" } }, "データを入れると表示されます")); return; }
+  const svg = donut(items, [shortYen(total), centerLabel]);
+  box.append(svg, legendFor(items, total, svg.colors || []));
+}
+const shortYen = (v) => (v >= 1e8 ? `¥${(v / 1e8).toFixed(2)}億` : v >= 1e4 ? `¥${(v / 1e4).toFixed(1)}万` : yen(v));
+
+function drawLine(box, points, label) {
+  box.textContent = "";
+  if (points.length < 2) { box.append(el("div", { className: "empty-chart" }, "記録が2日分たまると表示されます（データを変えた日に自動で記録）")); return; }
+  box.append(line(points, label));
+  const first = points[0].v, last = points[points.length - 1].v;
+  box.append(el("p", { className: "muted small" }, `${fmtDate(points[0].date)}から ${signedYen(last - first)}`));
+}
+
+// ---------- 資産 ----------
+$("a-by").addEventListener("change", () => { uiSet("aBy", $("a-by").value); render(); });
+$("a-sort").addEventListener("change", () => { uiSet("aSort", $("a-sort").value); render(); });
+function renderAssets(s) {
+  $("a-value").textContent = yen(s.value);
+  const g = $("a-gain");
+  g.className = `gain ${s.gain > 0 ? "up" : s.gain < 0 ? "down" : ""}`;
+  g.textContent = s.gain != null ? `評価損益 ${signedYen(s.gain)}（${signedPct(s.gainPct)}）` : "";
+  const sub = [];
+  if (s.cost) sub.push(`取得額 ${yen(s.cost)}`);
+  if (s.missingPrice) sub.push(`株価未入力 ${s.missingPrice}件は含まず`);
+  $("a-sub").textContent = sub.join(" ／ ");
+  drawDonut($("a-donut"), s, $("a-by").value, "value", "評価額");
+  drawLine($("a-line"), series(state, ui.account, "value"), "資産の推移");
+  const key = $("a-sort").value;
+  const rows = [...s.rows].sort((a, b) => key === "code" ? a.h.code.localeCompare(b.h.code)
+    : key === "gain" ? (b.gain ?? -Infinity) - (a.gain ?? -Infinity)
+    : key === "gainPct" ? ((b.gain ?? 0) / (b.cost || Infinity)) - ((a.gain ?? 0) / (a.cost || Infinity))
+    : (b.value ?? -1) - (a.value ?? -1));
+  $("a-count").textContent = `銘柄一覧（${rows.length}）`;
+  const ul = $("a-list"); ul.textContent = "";
+  for (const r of rows) {
+    const gp = r.gain != null && r.cost ? (r.gain / r.cost) * 100 : null;
+    ul.append(holdingRow(r, state.settings.tax, [
+      el("span", { className: "k", textContent: "損益" }),
+      el("span", { className: `v ${r.gain > 0 ? "up" : r.gain < 0 ? "down" : ""}`, textContent: r.gain != null ? `${signedYen(r.gain)}` : "—" }),
+      el("span", { className: "k", textContent: "損益率" }),
+      el("span", { className: `v ${gp > 0 ? "up" : gp < 0 ? "down" : ""}`, textContent: signedPct(gp) }),
+    ]));
   }
 }
-$("show-net").addEventListener("change", renderHome);
 
-function drawMonthChart(monthly, net) {
-  const box = $("month-chart"); box.textContent = "";
-  const NS = "http://www.w3.org/2000/svg";
-  const W = 340, H = 180, L = 4, R = 4, T = 16, B = 20;
-  const svg = document.createElementNS(NS, "svg");
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", "月ごとの配当の棒グラフ");
-  const mk = (t, attrs, text) => {
-    const n = document.createElementNS(NS, t);
-    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
-    if (text != null) n.textContent = text;
-    svg.append(n); return n;
-  };
-  const vals = monthly.map((m) => (net ? m.net : m.gross));
-  const max = Math.max(...vals, 1);
-  const slot = (W - L - R) / 12, bw = slot * 0.62;
-  const now = new Date().getMonth();
-  mk("line", { x1: L, x2: W - R, y1: H - B, y2: H - B, class: "grid" });
-  vals.forEach((v, i) => {
-    const h = (v / max) * (H - T - B);
-    const x = L + i * slot + (slot - bw) / 2;
-    if (v > 0) {
-      mk("rect", { x, y: H - B - h, width: bw, height: Math.max(h, 1), rx: 2, class: i === now ? "bar now" : "bar" });
-      const short = v >= 10000 ? `${(v / 10000).toFixed(v >= 100000 ? 0 : 1)}万` : Math.round(v).toLocaleString("ja-JP");
-      mk("text", { x: x + bw / 2, y: H - B - h - 3, "text-anchor": "middle", class: "val" }, short);
-    }
-    mk("text", { x: x + bw / 2, y: H - 6, "text-anchor": "middle", class: "axis" }, `${i + 1}`);
-  });
-  box.append(svg);
-  box.append(el("p", { className: "muted small" }, "数字は月（1〜12月）。緑は今月。"));
+// ---------- 配当 ----------
+$("d-by").addEventListener("change", () => { uiSet("dBy", $("d-by").value); render(); });
+function renderDividends(s) {
+  const tax = state.settings.tax;
+  $("d-label").textContent = `年間配当金額（${tax === "net" ? "税引後" : "税引前"}）`;
+  $("d-total").textContent = yen(tax === "net" ? s.net : s.gross);
+  $("d-yield").textContent = s.yieldOnValue != null ? `年利 ${pct(s.yieldOnValue)}` : "";
+  const sub = [];
+  if (s.yieldOnCost != null) sub.push(`取得利回り ${pct(s.yieldOnCost)}`);
+  if (s.value) sub.push(`評価額 ${yen(s.value)}`);
+  if (s.yutai) sub.push(`優待 ${yen(s.yutai)}/年`);
+  $("d-sub").textContent = sub.join(" ／ ");
+  const vals = s.monthly.map((m) => ({ a: tax === "net" ? m.net : m.gross, b: m.yutai }));
+  $("d-avg").textContent = `月平均 ${yen(vals.reduce((a, x) => a + x.a, 0) / 12)}`;
+  const box = $("d-bars"); box.textContent = "";
+  box.append(monthBars(vals, { selected: ui.month, now: new Date().getMonth(), onSelect: (i) => { ui.month = i; renderDividends(s); } }));
+  const items = monthItems(s, ui.month, tax);
+  const total = vals[ui.month].a + vals[ui.month].b;
+  $("d-month-label").textContent = `内訳（${ui.month + 1}月${state.settings.basis === "record" ? "・確定月" : ""}）：${yen(total)}`;
+  const ul = $("d-month"); ul.textContent = "";
+  if (!items.length) ul.append(el("li", { className: "muted" }, "この月の配当はありません"));
+  for (const x of items) {
+    const li = el("li", {},
+      el("span", {}, `${x.r.h.name || x.r.h.code}`, el("span", { className: "sub" }, [x.r.h.code.length > 8 ? "投資信託" : x.r.h.code, state.accounts.length > 1 ? accountName(x.r.h.accountId) : "", TAX_TYPES[x.r.h.taxType]].filter(Boolean).join(" ・ "))),
+      el("span", { className: "right" }, yen(x.v), x.yutai ? el("span", { className: "sub" }, `優待 ${yen(x.yutai)}`) : null),
+    );
+    li.addEventListener("click", () => openEdit(x.r.h.id));
+    ul.append(li);
+  }
+  drawDonut($("d-donut"), s, $("d-by").value, tax, tax === "net" ? "税引後" : "税引前");
+  drawLine($("d-line"), series(state, ui.account, "div"), "配当の推移");
 }
 
 // ---------- 銘柄一覧 ----------
-function renderHoldings() {
-  const ul = $("holding-list"); ul.textContent = "";
-  if (!state.holdings.length) { ul.append(el("li", { className: "muted" }, "まだ銘柄がありません")); return; }
-  const rows = [...state.holdings].sort((a, b) => annualGross(b) - annualGross(a));
-  for (const h of rows) {
-    const g = annualGross(h);
-    const y = yieldOnCost(h);
-    const li = el("li", {},
-      el("span", {}, `${h.name || "（名前なし）"}`, tag(h.account),
-        el("span", { className: "sub" }, `${h.code} ／ ${fmtNum(h.shares)}株${h.payments.length ? ` ／ 1株 ${fmtNum(annualDps(h))}円` : ""}`)),
-      el("span", { className: "right" }, h.payments.length ? yen(g) : "配当未入力",
-        el("span", { className: "sub" }, y != null ? `利回り ${pct(y)}` : "")),
-    );
-    li.addEventListener("click", () => openEdit(h.id));
-    ul.append(li);
+$("h-sort").addEventListener("change", () => { uiSet("hSort", $("h-sort").value); render(); });
+$("add-holding").addEventListener("click", () => openEdit(null));
+$("go-import").addEventListener("click", () => go("import"));
+$("go-update").addEventListener("click", () => go("update"));
+function renderHoldings(s) {
+  const key = $("h-sort").value;
+  const rows = [...s.rows].sort((a, b) => key === "code" ? a.h.code.localeCompare(b.h.code)
+    : key === "yield" ? (b.yieldOnValue ?? -1) - (a.yieldOnValue ?? -1)
+    : key === "value" ? (b.value ?? -1) - (a.value ?? -1)
+    : (b.gross ?? -1) - (a.gross ?? -1));
+  $("h-count").textContent = `${rows.length} 銘柄`;
+  const ul = $("h-list"); ul.textContent = "";
+  if (!rows.length) ul.append(el("li", { className: "muted" }, "まだ銘柄がありません"));
+  for (const r of rows) {
+    ul.append(holdingRow(r, state.settings.tax, [
+      el("span", { className: "k", textContent: "利回り" }), el("span", { className: "v", textContent: pct(r.yieldOnValue) }),
+      el("span", { className: "k", textContent: "取得" }), el("span", { className: "v", textContent: pct(r.yieldOnCost) }),
+    ]));
   }
 }
-$("add-holding").addEventListener("click", () => openEdit(null));
 
 // ---------- 追加・編集 ----------
 let editingId = null;
-function paymentRow(p = { month: 6, dps: null }) {
-  const sel = el("select", { "aria-label": "支払い月" });
+const monthOptions = (sel, withBlank) => {
+  if (withBlank) sel.append(el("option", { value: "", textContent: "—" }));
   for (let m = 1; m <= 12; m++) sel.append(el("option", { value: String(m), textContent: `${m}月` }));
-  sel.value = String(p.month);
-  const inp = el("input", { type: "text", inputMode: "decimal", placeholder: "1株あたり 円", value: p.dps == null ? "" : String(p.dps) });
-  inp.setAttribute("aria-label", "1株あたりの配当（円）");
+};
+monthOptions($("f-yutai-month"), false);
+for (const [k, v] of Object.entries(TAX_TYPES)) $("f-tax").append(el("option", { value: k, textContent: v }));
+
+function paymentRow(p = {}) {
+  const rec = el("select", {}); monthOptions(rec, true); rec.value = p.recordMonth ? String(p.recordMonth) : "";
+  rec.setAttribute("aria-label", "確定月");
+  const pay = el("select", {}); monthOptions(pay, false); pay.value = String(p.payMonth || 6);
+  pay.setAttribute("aria-label", "支払月");
+  const dps = el("input", { type: "text", inputMode: "decimal", value: p.dps == null ? "" : String(p.dps) });
+  dps.setAttribute("aria-label", "1株あたりの配当");
   const del = el("button", { type: "button", className: "mini danger", textContent: "×" });
-  const li = el("li", {}, sel, inp, del);
+  const li = el("li", {}, rec, pay, dps, del);
   del.addEventListener("click", () => { li.remove(); updatePreview(); });
-  sel.addEventListener("change", updatePreview);
-  inp.addEventListener("input", updatePreview);
+  for (const x of [rec, pay, dps]) x.addEventListener("input", updatePreview);
   return li;
 }
+function updateUnitLabels() {
+  const t = $("f-asset").value;
+  const cur = t === "us" ? "（ドル）" : t === "fund" ? "（1万口あたり・円）" : "（円）";
+  $("f-shares-label").firstChild.textContent = t === "fund" ? "口数" : "株数";
+  $("f-cost-label").firstChild.textContent = `取得単価${cur}`;
+  $("f-price-label").firstChild.textContent = `${t === "fund" ? "基準価額" : "現在値"}${cur}`;
+  $("f-dps-head").textContent = t === "fund" ? "分配金/1万口" : t === "us" ? "1株配当($)" : "1株配当(円)";
+  $("f-unit-note").textContent = t === "us" ? "米国株は配当・株価をドルで入力。円への換算は「設定」のドル円レートを使います。" : t === "fund" ? "投資信託は、基準価額と分配金を1万口あたりで入力します。" : "";
+}
+$("f-asset").addEventListener("change", () => { updateUnitLabels(); updatePreview(); });
 function readForm() {
   const payments = [];
   let bad = false;
   for (const li of $("f-payments").children) {
-    const [sel, inp] = li.querySelectorAll("select, input");
-    if (!inp.value.trim()) continue;
-    const dps = parseNumber(inp.value);
+    const [rec, pay, dpsEl] = li.querySelectorAll("select, input");
+    if (!dpsEl.value.trim()) continue;
+    const dps = parseNumber(dpsEl.value);
     if (dps === null || dps < 0) { bad = true; continue; }
-    payments.push({ month: Number(sel.value), dps });
+    payments.push({ recordMonth: rec.value ? Number(rec.value) : null, payMonth: Number(pay.value), dps });
   }
+  const opt = (id) => ($(id).value.trim() ? parseNumber($(id).value) : null);
+  const optBad = (id) => $(id).value.trim() !== "" && parseNumber($(id).value) === null;
   return {
-    code: $("f-code").value.trim().toUpperCase(),
-    name: $("f-name").value.trim(),
+    assetType: $("f-asset").value,
+    code: $("f-code").value.trim().toUpperCase().slice(0, 16),
+    name: $("f-name").value.trim().slice(0, 60),
+    accountId: $("f-account").value,
+    taxType: $("f-tax").value,
     shares: parseNumber($("f-shares").value),
-    cost: $("f-cost").value.trim() ? parseNumber($("f-cost").value) : null,
-    account: $("f-account").value,
-    payments, bad,
+    cost: opt("f-cost"), price: opt("f-price"),
+    sector: $("f-sector").value.trim().slice(0, 30),
+    yutai: opt("f-yutai"),
+    yutaiMonth: $("f-yutai-month").value ? Number($("f-yutai-month").value) : null,
+    memo: $("f-memo").value.trim().slice(0, 300),
+    noDividend: $("f-nodiv").checked,
+    payments,
+    bad: bad || optBad("f-cost") || optBad("f-price") || optBad("f-yutai"),
   };
 }
 function updatePreview() {
   const f = readForm();
-  if (f.shares == null || !f.payments.length) { $("f-preview").textContent = ""; return; }
-  const g = annualGross(f);
-  const n = f.account === "nisa" ? g : g * (1 - TAX_RATE);
-  const y = yieldOnCost(f);
-  $("f-preview").textContent = `年間 ${yen(g)}（税引後 ${yen(n)}）${y != null ? ` ／ 取得利回り ${pct(y)}` : ""}`;
+  if (f.shares == null) { $("f-preview").textContent = ""; return; }
+  const m = holdingMetrics({ ...f, priceDate: null }, state.fx, "pay");
+  const parts = [];
+  if (m.gross != null && f.payments.length) parts.push(`年間配当 ${yen(m.gross)}（税引後 ${yen(m.net)}）`);
+  if (m.value != null) parts.push(`評価額 ${yen(m.value)}`);
+  if (m.yieldOnValue != null) parts.push(`利回り ${pct(m.yieldOnValue)}`);
+  if (m.missingFx) parts.push("ドル円レート未設定");
+  $("f-preview").textContent = parts.join(" ／ ");
 }
-for (const id of ["f-shares", "f-cost", "f-account"]) $(id).addEventListener("input", updatePreview);
+for (const id of ["f-shares", "f-cost", "f-price", "f-tax", "f-yutai"]) $(id).addEventListener("input", updatePreview);
 $("f-add-payment").addEventListener("click", () => {
   const ul = $("f-payments");
-  const lastMonth = ul.lastElementChild ? Number(ul.lastElementChild.querySelector("select").value) : 0;
-  ul.append(paymentRow({ month: lastMonth ? ((lastMonth + 5) % 12) + 1 : 6, dps: null }));
+  const last = ul.lastElementChild;
+  const lastPay = last ? Number(last.querySelectorAll("select")[1].value) : 0;
+  ul.append(paymentRow({ payMonth: lastPay ? ((lastPay + (($("f-asset").value === "us") ? 2 : 5)) % 12) + 1 : 6 }));
 });
 
 function openEdit(id) {
   editingId = id;
-  const h = state.holdings.find((x) => x.id === id) || { code: "", name: "", shares: null, cost: null, account: "taxable", payments: [] };
+  const h = state.holdings.find((x) => x.id === id) || {
+    assetType: "jp", code: "", name: "", accountId: ui.account !== "all" ? ui.account : state.accounts[0].id,
+    taxType: "taxable", shares: null, cost: null, price: null, sector: "", yutai: null, yutaiMonth: null, memo: "", noDividend: false, payments: [],
+  };
+  const acc = $("f-account"); acc.textContent = "";
+  for (const a of state.accounts) acc.append(el("option", { value: a.id, textContent: a.name }));
+  $("f-asset").value = h.assetType;
   $("f-code").value = h.code;
   $("f-name").value = h.name;
-  $("f-shares").value = h.shares == null ? "" : String(h.shares);
-  $("f-cost").value = h.cost == null ? "" : String(h.cost);
-  $("f-account").value = h.account;
+  acc.value = h.accountId;
+  $("f-tax").value = h.taxType;
+  const sv = (id, v) => { $(id).value = v == null ? "" : String(v); };
+  sv("f-shares", h.shares); sv("f-cost", h.cost); sv("f-price", h.price); sv("f-yutai", h.yutai);
+  $("f-sector").value = h.sector;
+  $("f-yutai-month").value = h.yutaiMonth ? String(h.yutaiMonth) : "";
+  if (!h.yutaiMonth) $("f-yutai-month").selectedIndex = -1;
+  $("f-memo").value = h.memo || "";
+  $("f-nodiv").checked = !!h.noDividend;
   const ul = $("f-payments"); ul.textContent = "";
   for (const p of h.payments) ul.append(paymentRow(p));
-  if (!h.payments.length) ul.append(paymentRow({ month: 6, dps: null }));
+  if (!h.payments.length) ul.append(paymentRow({}));
   $("f-delete").hidden = !id;
   $("f-msg").textContent = "";
-  updatePreview();
   TITLES.edit = id ? "銘柄の編集" : "銘柄の追加";
+  updateUnitLabels();
+  updatePreview();
   go("edit");
 }
 $("f-cancel").addEventListener("click", () => go("holdings"));
@@ -219,22 +355,23 @@ $("edit-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const f = readForm();
   const msg = $("f-msg"); msg.className = "msg error";
-  if (!f.code) { msg.textContent = "銘柄コードを入れてください"; return; }
-  if (f.shares === null || f.shares <= 0) { msg.textContent = "株数を数字で入れてください"; return; }
-  if (f.cost !== null && (Number.isNaN(f.cost) || f.cost < 0)) { msg.textContent = "取得単価を数字で入れてください"; return; }
-  if ($("f-cost").value.trim() && f.cost === null) { msg.textContent = "取得単価を数字で入れてください"; return; }
-  if (f.bad) { msg.textContent = "1株あたりの配当を数字で入れてください"; return; }
-  const dup = state.holdings.find((x) => x.code === f.code && x.account === f.account && x.id !== editingId);
-  if (dup) { msg.textContent = `同じ口座に ${f.code} がすでにあります`; return; }
-  const data = { code: f.code.slice(0, 12), name: f.name.slice(0, 60), shares: f.shares, cost: f.cost, account: f.account, payments: f.payments };
-  if (editingId) Object.assign(state.holdings.find((x) => x.id === editingId), data);
+  if (!f.code) { msg.textContent = "コードを入れてください"; return; }
+  if (f.shares === null || f.shares <= 0) { msg.textContent = "株数（口数）を数字で入れてください"; return; }
+  if (f.bad) { msg.textContent = "数字の欄に、数字でない値があります"; return; }
+  const dup = state.holdings.find((x) => x.code === f.code && x.accountId === f.accountId && x.taxType === f.taxType && x.id !== editingId);
+  if (dup) { msg.textContent = `同じ口座・口座区分に ${f.code} がすでにあります`; return; }
+  const { bad, ...data } = f;
+  const prev = state.holdings.find((x) => x.id === editingId);
+  data.priceDate = data.price != null ? (prev && prev.price === data.price ? prev.priceDate : todayKey()) : null;
+  if (prev) Object.assign(prev, data);
   else state.holdings.push({ id: uid(), ...data });
   commit();
   go("holdings");
 });
 
 // ---------- CSV 読み込み ----------
-let csv = null; // { rows, header, width }
+let csv = null; // { rows, header, found }
+const COLS = [["c-code", "code"], ["c-name", "name", true], ["c-shares", "shares"], ["c-cost", "cost", true], ["c-price", "price", true]];
 $("csv-file").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   e.target.value = ""; // 同じファイルを選び直せるように。中身はメモリ上だけで扱い、保存しない。
@@ -246,79 +383,118 @@ $("csv-file").addEventListener("change", async (e) => {
   if (rows.length < 2) { msg.className = "msg error"; msg.textContent = "CSVとして読めませんでした"; return; }
   const header = detectHeaderRow(rows);
   const width = Math.max(...rows.map((r) => r.length));
-  csv = { rows, header, width };
   const guess = guessColumns(rows[header]);
-  for (const [id, key, optional] of [["c-code", "code"], ["c-name", "name", true], ["c-shares", "shares"], ["c-cost", "cost", true]]) {
+  for (const [id, key, optional] of COLS) {
     const sel = $(id); sel.textContent = "";
     if (optional) sel.append(el("option", { value: "-1", textContent: "（使わない）" }));
     for (let c = 0; c < width; c++) sel.append(el("option", { value: String(c), textContent: rows[header][c] || `${c + 1}列目` }));
     sel.value = String(guess[key] >= 0 ? guess[key] : optional ? -1 : 0);
   }
+  csv = { rows, header, found: [] };
   $("csv-step2").hidden = false;
-  updateCsvPreview();
+  readCsv();
 });
-for (const id of ["c-code", "c-name", "c-shares", "c-cost"]) $(id).addEventListener("change", updateCsvPreview);
-
-const csvCols = () => ({ code: Number($("c-code").value), name: Number($("c-name").value), shares: Number($("c-shares").value), cost: Number($("c-cost").value) });
-function updateCsvPreview() {
+for (const [id] of COLS) $(id).addEventListener("change", readCsv);
+function readCsv() {
   if (!csv) return;
-  const found = extractHoldings(csv.rows, csv.header, csvCols());
-  const t = $("csv-preview"); t.textContent = "";
-  t.append(el("tr", {}, ...["コード", "銘柄名", "株数", "取得単価", "口座"].map((h) => el("th", { textContent: h }))));
-  for (const f of found.slice(0, 50)) {
-    t.append(el("tr", {}, ...[f.code, f.name, fmtNum(f.shares), fmtNum(f.cost), ACCOUNTS[f.account]].map((v) => el("td", { textContent: v ?? "" }))));
-  }
-  const msg = $("csv-msg");
-  msg.className = found.length ? "msg" : "msg error";
-  msg.textContent = found.length ? `${found.length} 銘柄を読み取りました。内容を確認して「登録する」を押してください。` : "銘柄を読み取れませんでした。使う列を選び直してください。";
-  $("csv-apply").disabled = !found.length;
+  const cols = Object.fromEntries(COLS.map(([id, key]) => [key, Number($(id).value)]));
+  csv.found = extractHoldings(csv.rows, csv.header, cols).map((f) => ({ ...f, checked: true }));
+  renderCsvList();
 }
+function renderCsvList() {
+  const ul = $("c-list"); ul.textContent = "";
+  for (const f of csv.found) {
+    const cb = el("input", { type: "checkbox", checked: f.checked });
+    cb.addEventListener("change", () => { f.checked = cb.checked; renderCsvCount(); });
+    const price = f.price != null ? ` ／ ${f.assetType === "us" ? "$" : ""}${fmtNum(f.price, 2)}${f.assetType === "us" ? "" : "円"}` : "";
+    ul.append(el("li", {}, cb,
+      el("span", {}, `${f.assetType === "fund" ? "" : `${f.code} `}${f.name || ""}`, el("span", { className: "sub" }, `${ASSET_TYPES[f.assetType]} ・ ${TAX_TYPES[f.taxType]}${price}`)),
+      el("span", { className: "right" }, `${fmtNum(f.shares)}${f.assetType === "fund" ? "口" : "株"}`),
+    ));
+  }
+  renderCsvCount();
+}
+function renderCsvCount() {
+  const n = csv.found.filter((f) => f.checked).length;
+  $("c-count").textContent = `${n} / ${csv.found.length} 件選択中`;
+  $("c-toggle").textContent = n ? "すべて解除" : "すべて選択";
+  $("csv-apply").disabled = n === 0;
+  const msg = $("csv-msg");
+  msg.className = csv.found.length ? "msg" : "msg error";
+  msg.textContent = csv.found.length ? "" : "銘柄を読み取れませんでした。「読み取る列を変える」で列を選び直してください。";
+}
+$("c-toggle").addEventListener("click", () => {
+  const any = csv.found.some((f) => f.checked);
+  for (const f of csv.found) f.checked = !any;
+  renderCsvList();
+});
 $("csv-apply").addEventListener("click", () => {
   if (!csv) return;
-  const found = extractHoldings(csv.rows, csv.header, csvCols());
+  const accountId = $("c-account").value;
+  const today = todayKey();
+  // 同じ口座区分・同じ銘柄の複数行（買付日ごと等）はまとめる
+  const merged = new Map();
+  for (const f of csv.found.filter((x) => x.checked)) {
+    const k = `${f.code}|${f.taxType}`;
+    const m = merged.get(k);
+    if (!m) { merged.set(k, { ...f }); continue; }
+    const total = m.shares + f.shares;
+    if (m.cost != null && f.cost != null) m.cost = (m.cost * m.shares + f.cost * f.shares) / total;
+    m.shares = total;
+    m.price = f.price ?? m.price;
+  }
   let added = 0, updated = 0;
-  const seen = new Set();
-  for (const f of found) {
-    const k = `${f.code}|${f.account}`;
-    if (seen.has(k)) { // 同じ口座に同じ銘柄が複数行（買付日ごと等）→株数を足す
-      const h = state.holdings.find((x) => x.code === f.code && x.account === f.account);
-      if (h) h.shares += f.shares;
-      continue;
+  for (const f of merged.values()) {
+    const h = state.holdings.find((x) => x.accountId === accountId && x.code === f.code && x.taxType === f.taxType);
+    if (h) {
+      h.shares = f.shares;
+      if (f.cost != null) h.cost = f.cost;
+      if (f.price != null) { h.price = f.price; h.priceDate = today; }
+      if (!h.name && f.name) h.name = f.name;
+      updated++;
+    } else {
+      state.holdings.push({
+        id: uid(), accountId, taxType: f.taxType, assetType: f.assetType, code: f.code, name: f.name,
+        shares: f.shares, cost: f.cost, price: f.price, priceDate: f.price != null ? today : null,
+        sector: "", yutai: null, yutaiMonth: null, memo: "", noDividend: false, payments: [],
+      });
+      added++;
     }
-    seen.add(k);
-    const h = state.holdings.find((x) => x.code === f.code && x.account === f.account);
-    if (h) { h.shares = f.shares; if (f.cost != null) h.cost = f.cost; if (!h.name && f.name) h.name = f.name; updated++; }
-    else { state.holdings.push({ id: uid(), code: f.code, name: f.name, shares: f.shares, cost: f.cost, account: f.account, payments: [] }); added++; }
   }
   let removed = 0;
   if ($("c-remove").checked) {
     const before = state.holdings.length;
-    state.holdings = state.holdings.filter((h) => seen.has(`${h.code}|${h.account}`));
+    state.holdings = state.holdings.filter((h) => h.accountId !== accountId || merged.has(`${h.code}|${h.taxType}`));
     removed = before - state.holdings.length;
   }
   commit();
   csv = null;
   $("csv-step2").hidden = true;
   $("csv-msg").className = "msg";
-  $("csv-msg").textContent = `追加 ${added} 件・更新 ${updated} 件${removed ? `・削除 ${removed} 件` : ""}。新しい銘柄は「銘柄」で配当を入力してください。`;
+  $("csv-msg").textContent = `追加 ${added}件・更新 ${updated}件${removed ? `・削除 ${removed}件` : ""}。配当は「Claudeで更新」でまとめて入れられます。`;
 });
 
-// ---------- 配当の貼り付け ----------
-// 送るのは銘柄コードと名前だけ（株数・取得単価・口座は含めない）
+// ---------- Claude で更新 ----------
+// 送るのは銘柄コード・名前・種類だけ（株数・金額・口座は含めない）
 $("copy-codes").addEventListener("click", async () => {
   const msg = $("div-msg");
-  const seen = new Set();
-  const lines = [];
-  for (const h of state.holdings) {
-    if (seen.has(h.code)) continue;
-    seen.add(h.code);
-    lines.push(`${h.code} ${h.name}`.trim());
-  }
-  if (!lines.length) { msg.className = "msg error"; msg.textContent = "先に銘柄を登録してください"; return; }
-  const text = `次の銘柄の、1株あたり配当（予想）と支払い月を調べて、「コード,月,1株配当」の形で返してください。\n${lines.join("\n")}`;
+  const seen = new Map();
+  for (const h of state.holdings) if (!seen.has(h.code)) seen.set(h.code, `${h.code} ${h.name}（${ASSET_TYPES[h.assetType]}）`.replace(/\s+（/, "（"));
+  if (!seen.size) { msg.className = "msg error"; msg.textContent = "先に銘柄を登録してください"; return; }
+  const text = [
+    "配当メモの更新をお願いします。次の銘柄を公開情報で調べて、下の形式の行だけで返してください。",
+    "形式：コード,確定月,支払月,1株配当,株価,業種",
+    "・配当は今期の会社予想（なければ直近の実績）。年に複数回なら回数分の行に分け、株価と業種は1行目だけでよい",
+    "・米国株はドル、投資信託は1万口あたりの円（分配金・基準価額）",
+    "・配当・分配金がない銘柄は「コード,,,0,株価,業種」の1行",
+    "・1行目に USDJPY,現在のドル円",
+    "・調べた情報源を最後に「#」で始まる行で書く",
+    "銘柄：",
+    ...seen.values(),
+  ].join("\n");
   try {
     await navigator.clipboard.writeText(text);
-    msg.className = "msg"; msg.textContent = `${lines.length} 銘柄のコードをコピーしました。Claude に貼り付けて送ってください。`;
+    msg.className = "msg"; msg.textContent = `${seen.size} 銘柄の依頼文をコピーしました。Claude に貼り付けて送ってください。`;
   } catch {
     $("div-text").value = text;
     $("div-text").select();
@@ -327,27 +503,82 @@ $("copy-codes").addEventListener("click", async () => {
 });
 $("div-apply").addEventListener("click", () => {
   const msg = $("div-msg"); msg.className = "msg error";
-  const { byCode, errors } = parseDividendText($("div-text").value);
-  if (!byCode.size) { msg.textContent = errors.length ? `読めない行があります（${errors.slice(0, 5).join("・")}行目）` : "貼り付けてください"; return; }
+  const { byCode, errors, usdjpy } = parseDividendText($("div-text").value);
+  if (!byCode.size && !usdjpy) { msg.textContent = errors.length ? `読めない行があります（${errors.slice(0, 5).join("・")}行目）` : "貼り付けてください"; return; }
+  const today = todayKey();
+  if (usdjpy) state.fx = { usdjpy, date: today };
   let updated = 0;
   const notFound = [];
-  for (const [code, payments] of byCode) {
-    const targets = state.holdings.filter((h) => h.code === code);
+  for (const [code, info] of byCode) {
+    const targets = state.holdings.filter((h) => h.code.toUpperCase() === code);
     if (!targets.length) { notFound.push(code); continue; }
-    for (const h of targets) h.payments = payments.map((p) => ({ ...p }));
+    for (const h of targets) {
+      if (info.payments.length) { h.payments = info.payments.map((p) => ({ ...p })); h.noDividend = false; }
+      else if (info.noDividend) { h.payments = []; h.noDividend = true; }
+      if (info.price != null) { h.price = info.price; h.priceDate = today; }
+      if (info.sector) h.sector = info.sector;
+    }
     updated++;
   }
   commit();
   msg.className = "msg";
-  msg.textContent = `${updated} 銘柄の配当を反映しました。`
-    + (notFound.length ? `登録していない銘柄：${notFound.join("・")}。` : "")
-    + (errors.length ? `読めなかった行：${errors.slice(0, 5).join("・")}行目。` : "");
+  msg.textContent = [
+    `${updated} 銘柄を更新しました。`,
+    usdjpy ? `ドル円 ${usdjpy}。` : "",
+    notFound.length ? `登録していない銘柄：${notFound.join("・")}。` : "",
+    errors.length ? `読めなかった行：${errors.slice(0, 5).join("・")}行目。` : "",
+  ].join("");
   if (updated) $("div-text").value = "";
 });
 
-// ---------- 設定・バックアップ ----------
+// ---------- 設定 ----------
+$("s-account-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const name = $("s-account-name").value.trim().slice(0, 20);
+  if (!name) return;
+  if (state.accounts.length >= 10) { alert("口座は10個までです"); return; }
+  state.accounts.push({ id: uid(), name });
+  $("s-account-name").value = "";
+  commit();
+});
+function renderSettings() {
+  const ul = $("s-accounts"); ul.textContent = "";
+  for (const a of state.accounts) {
+    const n = state.holdings.filter((h) => h.accountId === a.id).length;
+    const ren = el("button", { type: "button", className: "mini", textContent: "名前変更" });
+    ren.addEventListener("click", () => {
+      const v = prompt("新しい名前", a.name);
+      if (v && v.trim()) { a.name = v.trim().slice(0, 20); commit(); }
+    });
+    const del = el("button", { type: "button", className: "mini danger", textContent: "削除" });
+    del.addEventListener("click", () => {
+      if (state.accounts.length === 1) { alert("口座は1つ以上必要です"); return; }
+      if (n) { alert(`この口座には ${n} 銘柄あります。先に銘柄を削除するか、別の口座に移してください。`); return; }
+      if (!confirm(`「${a.name}」を削除しますか？`)) return;
+      state.accounts = state.accounts.filter((x) => x.id !== a.id);
+      if (ui.account === a.id) { ui.account = "all"; uiSet("account", "all"); }
+      commit();
+    });
+    ul.append(el("li", {}, el("span", {}, a.name, el("span", { className: "sub" }, `${n} 銘柄`)), el("span", { className: "right" }, ren, " ", del)));
+  }
+  $("s-fx").value = state.fx.usdjpy ?? "";
+  $("s-fx-date").textContent = state.fx.date ? `${fmtDate(state.fx.date)} に設定` : "未設定";
+  const ca = $("c-account"); const keep = ca.value; ca.textContent = "";
+  for (const a of state.accounts) ca.append(el("option", { value: a.id, textContent: a.name }));
+  ca.value = state.accounts.some((a) => a.id === keep) ? keep : (ui.account !== "all" ? ui.account : state.accounts[0].id);
+  let last = null;
+  try { last = localStorage.getItem("dividend-memo:lastExport"); } catch { /* 無視 */ }
+  $("last-export").textContent = last ? `最後に書き出した日：${fmtDate(last)}` : "まだ書き出していません";
+}
+$("s-fx-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const v = parseNumber($("s-fx").value);
+  if (v === null || v <= 0) { alert("ドル円レートを数字で入れてください（例：155.3）"); return; }
+  state.fx = { usdjpy: v, date: todayKey() };
+  commit();
+});
 $("export").addEventListener("click", () => {
-  const blob = new Blob([JSON.stringify(state, null, 1)], { type: "application/json" });
+  const blob = new Blob([JSON.stringify(state)], { type: "application/json" });
   const a = el("a", { href: URL.createObjectURL(blob), download: `dividend-memo-backup-${todayKey()}.json` });
   document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
@@ -363,37 +594,44 @@ $("restore").addEventListener("change", async (e) => {
     const next = validate(JSON.parse(await file.text()));
     if (!confirm(`${next.holdings.length} 銘柄のバックアップで、今のデータを置き換えますか？`)) return;
     state = next;
-    commit();
+    ui.account = "all";
+    save(state);
+    render();
     msg.className = "msg"; msg.textContent = "バックアップから戻しました";
   } catch (err) {
     msg.className = "msg error"; msg.textContent = err.message || "読み込めませんでした";
   }
 });
 $("wipe").addEventListener("click", () => {
-  if (!confirm("すべての銘柄を削除します。元に戻せません。先にバックアップを書き出しましたか？")) return;
+  if (!confirm("すべての銘柄・口座・履歴を削除します。元に戻せません。先にバックアップを書き出しましたか？")) return;
   if (!confirm("本当に削除しますか？")) return;
   clearAll();
   state = emptyState();
+  ui.account = "all";
   render();
 });
-function renderSettings() {
-  let last = null;
-  try { last = localStorage.getItem("dividend-memo:lastExport"); } catch { /* 無視 */ }
-  $("last-export").textContent = last ? `最後に書き出した日：${fmtDate(last)}` : "まだ書き出していません";
-}
 
 // ---------- 起動 ----------
+$("a-by").value = uiGet("aBy", "holding");
+$("a-sort").value = uiGet("aSort", "value");
+$("d-by").value = uiGet("dBy", "holding");
+$("h-sort").value = uiGet("hSort", "div");
+
 function render() {
-  renderHome();
-  renderHoldings();
+  renderTop();
+  const s = summary(state, { accountId: ui.account, basis: state.settings.basis });
+  renderNotice(s);
+  renderAssets(s);
+  renderDividends(s);
+  renderHoldings(s);
   renderSettings();
 }
 render();
+go(["assets", "dividends", "holdings", "settings"].includes(ui.page) ? ui.page : "dividends");
 
 requestPersist().then((ok) => {
   $("persist-status").textContent = ok ? "このiPhoneに、データを消さずに保管するよう設定されています。" : "";
 });
-
 if ("serviceWorker" in navigator && location.protocol === "https:") {
   navigator.serviceWorker.register("sw.js").catch(() => { /* オフライン対応なしでも動く */ });
 }

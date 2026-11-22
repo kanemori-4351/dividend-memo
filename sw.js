@@ -1,7 +1,7 @@
 // オフラインでも開けるように、アプリのファイルだけをこのiPhoneに保存する。
 // お金のデータはここでは扱わない（localStorage にある）。外部への通信もしない。
-const CACHE = "dividend-memo-v1";
-const FILES = ["./", "index.html", "app.css", "app.js", "lib/store.js", "lib/calc.js", "lib/csv.js", "manifest.webmanifest", "icon-180.png", "icon-512.png"];
+const CACHE = "dividend-memo-v2";
+const FILES = ["./", "index.html", "app.css", "app.js", "lib/store.js", "lib/model.js", "lib/calc.js", "lib/csv.js", "lib/chart.js", "manifest.webmanifest", "icon-180.png", "icon-512.png"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
